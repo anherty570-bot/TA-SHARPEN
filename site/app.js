@@ -3,13 +3,14 @@ import { Muxer, ArrayBufferTarget } from "https://cdn.jsdelivr.net/npm/mp4-muxer
 ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/";
 const $ = s => document.querySelector(s), vid = $("#v"), sleep = ms => new Promise(r => setTimeout(r, ms));
 const MODELS = { fast: "realesr-general-x4v3", anime: "realesr-animevideov3" };
-let file = null, V = null, cancelFlag = false, useWasm = false, busy = false;
+let file = null, V = null, useWasm = false;
+const ctlP = { cancel: false }, ctlF = { cancel: false }, busy = { p: false, f: false };
 const sessions = {}, cache = new Map();
 const fmt = t => { const m = Math.floor(t / 60); return String(m).padStart(2, "0") + ":" + (t - m * 60).toFixed(3).padStart(6, "0"); };
 const parse = s => { s = s.trim(); if (s.includes(":")) { const [m, x] = s.split(":"); return +m * 60 + +x; } return +s; };
 const err = m => { $("#err").hidden = !m; $("#err").textContent = m || ""; };
 const warn = m => { $("#warn").hidden = !m; $("#warn").textContent = m || ""; };
-const CANC = "CANCELLED", chk = () => { if (cancelFlag) throw new Error(CANC); };
+const CANC = "CANCELLED", chk = c => { if (c.cancel) throw new Error(CANC); };
 
 // ---------- AI (ONNX Runtime Web, Real-ESRGAN compact nets) ----------
 async function getSession(model) {
@@ -23,8 +24,10 @@ async function getSession(model) {
     { executionProviders: navigator.gpu && !useWasm ? ["webgpu", "wasm"] : ["wasm"], graphOptimizationLevel: "all" });
   return sessions[key];
 }
+// One shared AI lock: frame preview and full video can run at the same time; tiles from both are interleaved.
+let chain = Promise.resolve(); const exclusive = f => { const p = chain.then(f); chain = p.catch(() => {}); return p; };
 async function runNet(model, tensor) {
-  try { return (await (await getSession(model)).run({ input: tensor })).output; }
+  try { return await exclusive(async () => (await (await getSession(model)).run({ input: tensor })).output); }
   catch (e) {
     if (e.message === "MODEL_MISSING") throw new Error("Không tìm thấy file model trên trang (404). Workflow tạo model chưa chạy hoặc bị lỗi: vào tab Actions của repo để xem.");
     if (navigator.gpu && !useWasm) { useWasm = true; warn("WebGPU lỗi → chuyển sang WASM (chậm hơn nhiều)."); return runNet(model, tensor); }
@@ -32,12 +35,12 @@ async function runNet(model, tensor) {
   }
 }
 // Tiled x4 inference; scale 2 = network output (x4) downsampled with high-quality filter.
-async function sr(src, scale, model, onTile) {
+async function sr(src, scale, model, onTile, ctl) {
   const w = src.width, h = src.height, px = src.getContext("2d").getImageData(0, 0, w, h).data;
   const W4 = w * 4, out = new ImageData(W4, h * 4), T = navigator.gpu && !useWasm ? 192 : 96, P = 8;
   const nT = Math.ceil(w / T) * Math.ceil(h / T); let k = 0;
   for (let y0 = 0; y0 < h; y0 += T) for (let x0 = 0; x0 < w; x0 += T) {
-    chk(); const x1 = Math.min(x0 + T, w), y1 = Math.min(y0 + T, h);
+    chk(ctl); const x1 = Math.min(x0 + T, w), y1 = Math.min(y0 + T, h);
     const sx = Math.max(x0 - P, 0), sy = Math.max(y0 - P, 0), ex = Math.min(x1 + P, w), ey = Math.min(y1 + P, h), tw = ex - sx, th = ey - sy;
     const inp = new Float32Array(3 * tw * th), pl = tw * th;
     for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
@@ -58,7 +61,7 @@ async function sr(src, scale, model, onTile) {
 }
 
 // ---------- video loading / frame access ----------
-const seek = (t) => new Promise((res, rej) => { vid.onseeked = () => res(); vid.onerror = () => rej(new Error("Không đọc được video")); vid.currentTime = t; });
+const seek = (t, el = vid) => new Promise((res, rej) => { el.onseeked = () => res(); el.onerror = () => rej(new Error("Không đọc được video")); el.currentTime = t; });
 const snap = v => [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 120].reduce((a, b) => Math.abs(b - v) < Math.abs(a - v) ? b : a);
 function estFps() { // measured from real decoded frame timestamps
   return new Promise(res => {
@@ -87,22 +90,23 @@ $("#prev").onclick = () => { vid.pause(); go(vid.currentTime - 1 / V.fps); };
 $("#next").onclick = () => { vid.pause(); go(vid.currentTime + 1 / V.fps); };
 const mk = (w, h) => Object.assign(document.createElement("canvas"), { width: w, height: h });
 const url = c => new Promise(r => c.toBlob(b => r(URL.createObjectURL(b)), "image/png"));
-const lock = on => { busy = on; $("#go").disabled = $("#full").disabled = on; };
+const lockP = on => { busy.p = on; $("#go").disabled = on; $("#cancelP").hidden = !on; $("#pp").hidden = !on; $("#pp").value = 0; };
+const lockF = on => { busy.f = on; $("#full").disabled = on; $("#cancelF").hidden = !on; $("#fp").hidden = !on; $("#fp").value = 0; };
 
 // ---------- frame preview ----------
 $("#go").onclick = async () => {
-  if (busy) return; err(); cancelFlag = false; lock(true); $("#pp").hidden = false; $("#cancel").hidden = false;
+  if (busy.p) return; err(); ctlP.cancel = false; lockP(true); $("#pt").textContent = "Đang chuẩn bị…";
   try {
     vid.pause(); const t = parse($("#ts").value), scale = +$("#scale").value, model = $("#model").value, key = [t.toFixed(3), scale, model].join("|");
     if (!cache.has(key)) {
       await seek(t); const c = mk(V.w, V.h); c.getContext("2d").drawImage(vid, 0, 0);
-      const t0 = performance.now(), a = await sr(c, scale, model, p => { $("#pp").value = 100 * p; $("#pt").textContent = `Đang xử lý ${(100 * p).toFixed(0)}%`; });
+      const t0 = performance.now(), a = await sr(c, scale, model, p => { $("#pp").value = 100 * p; $("#pt").textContent = `Đang làm nét frame ${(100 * p).toFixed(0)}%`; }, ctlP);
       cache.set(key, [await url(c), await url(a), (performance.now() - t0) / 1000]);
     }
     const [b, a, sec] = cache.get(key); $("#ib").src = b; $("#ia").src = a; $("#s-cmp").hidden = false;
-    $("#pt").textContent = `Xong trong ${sec.toFixed(1)} s (kết quả được cache theo timestamp/scale/model)`; $("#cmp").scrollIntoView();
+    $("#pt").textContent = `Xong trong ${sec.toFixed(1)} s`; $("#cmp").scrollIntoView();
   } catch (x) { x.message === CANC ? $("#pt").textContent = "Đã hủy" : (err(x.message), $("#pt").textContent = ""); }
-  lock(false); $("#pp").hidden = true; $("#cancel").hidden = true;
+  lockP(false);
 };
 // compare / zoom / pan
 let z = 1, px = 0, py = 0; const cmp = $("#cmp");
@@ -136,13 +140,15 @@ async function encodeAudio(a, muxer) {
   await ae.flush(); ae.close();
 }
 $("#full").onclick = async () => {
-  if (busy) return; err(); cancelFlag = false; $("#dl").hidden = true;
+  if (busy.f) return; err(); ctlF.cancel = false; $("#dl").hidden = true;
   if (!window.VideoEncoder) return err("Trình duyệt không hỗ trợ WebCodecs (cần Chrome/Edge/Safari mới).");
   if (V.w * V.h > 1280 * 720 * 1.05) return err("Xử lý cả video trong trình duyệt giới hạn ở 720p. Hãy giảm độ phân giải video trước.");
   const scale = +$("#scale").value, model = $("#model").value, fps = +$("#fps").value || V.fps, total = Math.floor(V.dur * fps);
-  const ow = V.w * scale, oh = V.h * scale; let enc;
-  lock(true); $("#fp").hidden = false; $("#cancel").hidden = false; vid.pause();
+  const ow = V.w * scale, oh = V.h * scale; let enc, fv;
+  lockF(true); $("#ft").textContent = "Đang chuẩn bị…";
   try {
+    fv = document.createElement("video"); fv.muted = true; fv.playsInline = true; fv.preload = "auto"; fv.src = vid.src;  // private decoder: preview can be used meanwhile
+    await new Promise((r, j) => { fv.onloadedmetadata = r; fv.onerror = () => j(new Error("Không đọc được video")); });
     const audio = await prepAudio(); if (!audio) warn("Không giữ được audio (video không có tiếng, hoặc trình duyệt không hỗ trợ mã hóa AAC). Video xuất ra sẽ không có tiếng.");
     const cfgs = ["avc1.640034", "avc1.64002A", "avc1.4D4028"].map(codec => ({ codec, width: ow, height: oh, framerate: fps, bitrate: Math.min(60e6, Math.round(ow * oh * fps * 0.12)) }));
     let cfg = null; for (const c of cfgs) if ((await VideoEncoder.isConfigSupported(c)).supported) { cfg = c; break; }
@@ -151,9 +157,9 @@ $("#full").onclick = async () => {
     let encErr = null; enc = new VideoEncoder({ output: (c, m) => muxer.addVideoChunk(c, m), error: e => encErr = e }); enc.configure(cfg);
     const t0 = performance.now(), src = mk(V.w, V.h), sx = src.getContext("2d", { willReadFrequently: true });
     for (let i = 0; i < total; i++) {
-      chk(); if (encErr) throw encErr;
-      await seek(Math.min(V.dur - 0.001, i / fps + 0.25 / V.fps)); sx.drawImage(vid, 0, 0);
-      const out = await sr(src, scale, model), f = new VideoFrame(out, { timestamp: Math.round(i * 1e6 / fps), duration: Math.round(1e6 / fps) });
+      chk(ctlF); if (encErr) throw encErr;
+      await seek(Math.min(V.dur - 0.001, i / fps + 0.25 / V.fps), fv); sx.drawImage(fv, 0, 0);
+      const out = await sr(src, scale, model, null, ctlF), f = new VideoFrame(out, { timestamp: Math.round(i * 1e6 / fps), duration: Math.round(1e6 / fps) });
       enc.encode(f, { keyFrame: i % Math.round(fps * 2) === 0 }); f.close();
       while (enc.encodeQueueSize > 6) await sleep(5);
       const n = i + 1, rate = n / ((performance.now() - t0) / 1000);
@@ -165,6 +171,8 @@ $("#full").onclick = async () => {
     $("#dl").href = URL.createObjectURL(blob); $("#dl").download = `upscaled_${scale}x.mp4`; $("#dl").hidden = false;
     $("#ft").textContent = `Hoàn tất · ${(blob.size / 1048576).toFixed(1)} MB`;
   } catch (x) { try { enc && enc.close(); } catch {} x.message === CANC ? $("#ft").textContent = "Đã hủy" : (err(x.message), $("#ft").textContent = ""); }
-  await seek(0).catch(() => {}); lock(false); $("#fp").hidden = true; $("#cancel").hidden = true;
+  if (fv) { fv.removeAttribute("src"); fv.load(); }
+  lockF(false);
 };
-$("#cancel").onclick = () => cancelFlag = true;
+$("#cancelP").onclick = () => ctlP.cancel = true;
+$("#cancelF").onclick = () => ctlF.cancel = true;
