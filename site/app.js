@@ -14,13 +14,19 @@ const CANC = "CANCELLED", chk = () => { if (cancelFlag) throw new Error(CANC); }
 // ---------- AI (ONNX Runtime Web, Real-ESRGAN compact nets) ----------
 async function getSession(model) {
   const key = model + useWasm;
-  if (!sessions[key]) sessions[key] = await ort.InferenceSession.create(`models/${MODELS[model]}.onnx`,
+  const u = `models/${MODELS[model]}.onnx`;
+  if (!sessions[key]) {
+    const r = await fetch(u, { method: "HEAD" }).catch(() => null);
+    if (!r || !r.ok) throw new Error("MODEL_MISSING");
+  }
+  if (!sessions[key]) sessions[key] = await ort.InferenceSession.create(u,
     { executionProviders: navigator.gpu && !useWasm ? ["webgpu", "wasm"] : ["wasm"], graphOptimizationLevel: "all" });
   return sessions[key];
 }
 async function runNet(model, tensor) {
   try { return (await (await getSession(model)).run({ input: tensor })).output; }
   catch (e) {
+    if (e.message === "MODEL_MISSING") throw new Error("Không tìm thấy file model trên trang (404). Workflow tạo model chưa chạy hoặc bị lỗi: vào tab Actions của repo để xem.");
     if (navigator.gpu && !useWasm) { useWasm = true; warn("WebGPU lỗi → chuyển sang WASM (chậm hơn nhiều)."); return runNet(model, tensor); }
     throw new Error("Model AI lỗi: " + (e.message || e));
   }
