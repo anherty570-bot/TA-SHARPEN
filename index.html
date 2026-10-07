@@ -1,0 +1,29 @@
+<!doctype html><html lang="vi"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>AI Video Sharpen</title><link rel="stylesheet" href="style.css"></head><body>
+<main>
+<h1>AI Video Sharpen</h1>
+<p class="mut">AI chạy ngay trong trình duyệt của bạn. Video không được tải lên đâu cả.</p>
+<div id="err" class="err" hidden></div><div id="warn" class="warn" hidden></div>
+<section><label class="btn big">Chọn video (MP4 / MOV / WEBM)<input id="file" type="file" accept="video/*,.mp4,.mov,.webm" hidden></label></section>
+<section id="s-vid" hidden>
+<pre id="meta" class="mut"></pre>
+<video id="v" controls playsinline muted></video>
+<input id="tl" type="range" min="0" max="1" step="0.001" value="0">
+<div class="row"><button id="prev" class="btn">◀ Frame</button><input id="ts" value="00:00.000" inputmode="decimal"><button id="next" class="btn">Frame ▶</button></div>
+<div class="row"><select id="scale"><option value="2">2×</option><option value="4">4×</option></select>
+<select id="model"><option value="fast">Tổng quát</option><option value="anime">Anime</option></select></div>
+<button id="go" class="btn big acc">AI LÀM NÉT FRAME</button>
+<progress id="pp" max="100" value="0" hidden></progress><p id="pt" class="mut"></p>
+</section>
+<section id="s-cmp" hidden>
+<div id="cmp"><div id="zw"><img id="ib" alt="Before"><img id="ia" alt="After"></div><span class="tag l">BEFORE</span><span class="tag r">AFTER</span></div>
+<label class="mut">Trước ↔ Sau</label><input id="sl" type="range" min="0" max="100" value="50">
+<label class="mut">Zoom <span id="zv">1×</span></label><input id="zm" type="range" min="1" max="6" step="0.1" value="1">
+<button id="fs" class="btn">Toàn màn hình</button>
+<h2>Xử lý toàn bộ video</h2>
+<select id="fps"><option value="">Giữ FPS gốc</option><option value="30">30 FPS</option><option value="60">60 FPS</option></select>
+<button id="full" class="btn big acc">AI LÀM NÉT TOÀN BỘ VIDEO</button>
+<progress id="fp" max="100" value="0" hidden></progress><p id="ft" class="mut"></p>
+<div class="row"><button id="cancel" class="btn" hidden>HỦY</button><a id="dl" class="btn acc" hidden>TẢI VIDEO</a></div>
+</section></main><script type="module" src="app.js"></script></body></html>
